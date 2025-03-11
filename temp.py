@@ -22,3 +22,5 @@ print("Number of CUDA devices:", torch.cuda.device_count())
 
 import torch
 from torch_geometric.data import Data
+import torch_cluster
+print(torch_cluster.__version__)

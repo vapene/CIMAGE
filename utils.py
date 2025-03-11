@@ -202,6 +202,8 @@ def set_args_node(args, cnt):
         # args.weight_decay = round(np.random.uniform(0.00001, 0.0002, 1)[0], 4)
         args.nodeclas_weight_decay = round(np.random.uniform(0.002, 0.007, 1)[0], 4)
         args.alpha_l = 1 # random.randint(1, 3)
+        args.cluster_emb = round(np.random.uniform(0.900, 0.999, 1)[0], 3)
+        args.tace = round(np.random.uniform(0.001, 1.0, 1)[0], 3)
         # args.mask_ratio = round(np.random.uniform(0.6, 0.8, 1)[0], 1)
         # args.epoch = np.random.randint(40, 60)
     elif args.dataset == 'Citeseer':
@@ -232,6 +234,8 @@ def set_args_node(args, cnt):
         args.weight_decay = round(np.random.uniform(0.00001, 0.00040, 1)[0], 5)
         args.nodeclas_weight_decay = round(np.random.uniform(0.05, 0.7, 1)[0], 2)
         args.alpha_l = random.randint(1, 3)
+        args.cluster_emb = round(np.random.uniform(0.900, 0.999, 1)[0], 3)
+        args.tace = round(np.random.uniform(0.001, 1.0, 1)[0], 3)
         # args.epoch = np.random.randint(80, 120)  # Random value between 20 and 300, inclusive
 
     elif args.dataset == 'Pubmed':
@@ -253,6 +257,8 @@ def set_args_node(args, cnt):
         args.recon_alpha = round(np.random.uniform(0.5, 0.8, 1)[0], 2)
         args.weight_decay = round(np.random.uniform(0.0008, 0.0015, 1)[0], 5)
         args.nodeclas_weight_decay = round(np.random.uniform(0.0005, 0.0015, 1)[0], 5)
+        args.cluster_emb = round(np.random.uniform(0.900, 0.999, 1)[0], 3)
+        args.tace = round(np.random.uniform(0.001, 1.0, 1)[0], 3)
     elif args.dataset == 'Photo':
         args.ncaps == 32
         args.hsic_lamb = round(np.random.uniform(1.0e-04, 2.0e-03, 1)[0], 5) 

@@ -2,31 +2,15 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import random
-import math
-from torch_geometric.nn import (
-    Linear,
-    GCNConv,
-    SAGEConv,
-)
+from torch_geometric.nn import Linear
 import numpy as np
-from torch_geometric.utils import to_undirected, add_self_loops, negative_sampling, degree, to_dense_adj
-from torch_geometric.nn import knn_graph
-from torch_sparse import SparseTensor
+from torch_geometric.utils import add_self_loops, negative_sampling, to_dense_adj
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score
-from torch_cluster import random_walk
-from torch_geometric.loader import NeighborSampler as RawNeighborSampler
 # custom modules
 from loss import setup_loss_fn, ce_loss
-# clustering lmports
-from munkres import Munkres
-from sklearn import metrics
-# torch version
 from HSICLassoVI_torch.models import api
 from utils import seed_worker
-
-from sklearn.neighbors import NearestNeighbors
-from sklearn.cluster import KMeans
 
 def creat_activation_layer(activation):
     if activation is None:
@@ -59,17 +43,16 @@ class MLPEncoder(nn.Module):
         for bn in self.bns:
             if not isinstance(bn, nn.Identity):
                 bn.reset_parameters()
-
-    def forward(self, args, epoch, x, remaining_edges, train_neighbors, cluster_pred, train_mask, train_B):
+    def forward(self, args, epoch, x, remaining_edges, train_neighbors, cluster_pred, train_mask):
         for i, conv in enumerate(self.convs[:-1]):
             x = self.dropout(x)
             x = conv(x)
             x = self.bns[i](x)
-            # x = self.activation(x)
+            x = self.activation(x)
         x = self.dropout(x)
         x = self.convs[-1](x)
         x = self.bns[-1](x)
-        disen_embedding, score_list = self.disentangle(args, epoch, x, remaining_edges, train_neighbors, cluster_pred, train_mask, train_B, train_=True)
+        disen_embedding, score_list = self.disentangle(args, epoch, x, remaining_edges, train_neighbors, cluster_pred, train_mask, train_=True)
         return disen_embedding, score_list
 
     def pairwise_euclidean_distances(self, x, y):
@@ -108,21 +91,18 @@ class MLPEncoder(nn.Module):
         normalized_adjacency_matrix = row_sum_inv_diag @ adjacency_matrix @ row_sum_inv_diag
         return torch.sparse.mm(normalized_adjacency_matrix, X)
 
-    def disentangle(self, args, epoch, z, remaining_edges, remaining_neighbors, cluster_pred, prev_unconflicted, block, train_=True):  # z shape 2708,256
-#        self.encoder(args, epoch, x, remaining_edges, train_neighbors, self.cluster_pred,self.previous_unconflicted, train_B)
-
+    def disentangle(self, args, epoch, z, remaining_edges, remaining_neighbors, cluster_pred, prev_unconflicted, train_=True):  # z shape 2708,256
         remain_data_adj_sp = torch.sparse_coo_tensor(remaining_edges, torch.ones(len(remaining_edges[0])).to(z.device),
                                                      [z.shape[0], z.shape[0]])
         ch_dim = z.shape[1] // args.ncaps
-        x = routing_layer_32(z, args.ncaps, args.nlayer, args.max_iter, remaining_neighbors) # torch.Size([2708, 512])
+        x = routing_layer_32(z, args.ncaps, args.nlayer, args.max_iter, remaining_neighbors) 
         print('126')
-        cluster_pred_use = cluster_pred[prev_unconflicted] # ([939])
-        # hidden_xs.append(x.view(-1, z.shape[1]))  # 675 torch.Size([2708, 512])
-        X_reshaped = x.view(-1, args.ncaps, z.shape[1] // args.ncaps) # 2708, 16, 32
+        cluster_pred_use = cluster_pred[prev_unconflicted] 
+        X_reshaped = x.view(-1, args.ncaps, z.shape[1] // args.ncaps) 
         result = []
         if train_:
             if epoch %5 ==0:
-                X_mean = torch.mean(X_reshaped[prev_unconflicted].transpose(1,2),dim=1) # torch.Size([939, 16]) torch.Size([939])
+                X_mean = torch.mean(X_reshaped[prev_unconflicted].transpose(1,2),dim=1)
                 
                 model_PH1 = api.Proposed_HSIC_Lasso(device=z.device, ch_dim=ch_dim,
                                                     lam=[np.inf, args.hsic_lamb])  
@@ -134,14 +114,13 @@ class MLPEncoder(nn.Module):
 
         for idx_f in range(args.ncaps):
             cur_output = self.gcn_agg(adj=remain_data_adj_sp, X=X_reshaped[:, idx_f, :])
-            # print('cur_output',cur_output.shape) # cur_output torch.Size([2708, 32])
             result.append(cur_output)
         x = torch.cat(result, dim=-1)
         print('145')
         return x, self.scores_list
 
     @torch.no_grad()
-    def get_embedding(self, args, x, edge_index, train_neighbors, y, train_mask, l2_normalize, block):
+    def get_embedding(self, args, x, edge_index, train_neighbors, y, train_mask, l2_normalize):
 
         for i, conv in enumerate(self.convs[:-1]):
             x = self.dropout(x)
@@ -151,7 +130,7 @@ class MLPEncoder(nn.Module):
         x = self.dropout(x)
         x = self.convs[-1](x)
         x = self.bns[-1](x)
-        disen_embedding, score_list = self.disentangle(args, 0 ,x, edge_index, train_neighbors, y, train_mask, block, train_=False)
+        disen_embedding, score_list = self.disentangle(args, 0 ,x, edge_index, train_neighbors, y, train_mask, train_=False)
         if l2_normalize:
             disen_embedding = F.normalize(disen_embedding, p=2, dim=1)
 
@@ -163,7 +142,6 @@ class EdgeDecoder(nn.Module):
                  num_layers=2, dropout=0.5, activation='relu'):
         super().__init__()
         self.mlps = nn.ModuleList()
-
         for i in range(num_layers):
             first_channels = in_channels if i == 0 else hidden_channels
             second_channels = 1 if i == num_layers - 1 else hidden_channels
@@ -210,108 +188,40 @@ class ChannelDecoder(nn.Module):
 
 
 def routing_layer_32(x, num_caps, nlayer, max_iter, neighbors):
-    # x torch.Size([2708, 512]) tensor([[ 633, 1862, 2582,  ...,   -1,   -1,   -1],
-    #         [   2,  652,   -1,  ...,   -1,   -1,   -1],
-    #         [   1,  332, 1454,  ...,   -1,   -1,   -1],
-    #         ...,
-    #         [  -1,   -1,   -1,  ...,   -1,   -1,   -1],
-    #         [ 165,  169, 1473,  ...,   -1,   -1,   -1],
-    #         [ 165,  598, 1473,  ...,   -1,   -1,   -1]], device='cuda:0') torch.Size([2708, 50])
     batch_size=500
     dev = x.device
     n, d, k, m = x.shape[0], x.shape[1], num_caps, len(neighbors[0])
-
     delta_d = int(d // k)
     _cache_zero_d = torch.zeros(1, d).to(dev)
     _cache_zero_k = torch.zeros(1, k).to(dev)
     final_chunks = []
-
     for nl in range(nlayer):
         if nl > 0:
-            x = final_chunks[-1]  # Reuse the last final_chunks as input
-        x = F.normalize(x.view(n, k, delta_d), dim=2).view(n, d)  # Normalize and convert to smaller data type
+            x = final_chunks[-1]  
+        x = F.normalize(x.view(n, k, delta_d), dim=2).view(n, d)
         temp_z = torch.cat([x, _cache_zero_d], dim=0)
         final_chunks_batch = []
-
         for idx in range(0, neighbors.shape[0], batch_size):
-            torch.cuda.empty_cache()  # Clear intermediate tensors
-
+            torch.cuda.empty_cache()  
             batch_end = min(idx + batch_size, neighbors.shape[0])
             neigh = neighbors[idx:batch_end, :]
             chunk_size = neigh.shape[0]
             z = temp_z[neigh].view(chunk_size, m, k, delta_d)
-
             u = None
             for clus_iter in range(max_iter):
                 if clus_iter == 0:
                     p = _cache_zero_k.expand(chunk_size * m, k).view(chunk_size, m, k)
                 else:
                     p = torch.sum(z * u.view(chunk_size, 1, k, delta_d), dim=3)
-
                 p = F.softmax(p, dim=2)
                 u = torch.sum(z * p.view(chunk_size, m, k, 1), dim=1)
-
                 u += x[idx:batch_end, :].view(chunk_size, k, delta_d)
                 if clus_iter < max_iter - 1:
-                    u = F.normalize(u, dim=2)  # Normalize and convert to smaller data type
-
+                    u = F.normalize(u, dim=2) 
             final_chunks_batch.append(u.view(chunk_size, d))
-
-        final_chunks_batch = torch.cat(final_chunks_batch, dim=0)  # Convert to original data type
+        final_chunks_batch = torch.cat(final_chunks_batch, dim=0)  
         final_chunks.append(final_chunks_batch)
-
-    return final_chunks[-1]  # Return the last final_chunks
-
-def routing_layer_16(x, num_caps, nlayer, max_iter, neighbors):
-    batch_size=500
-    dev = x.device
-    n, d, k, m = x.shape[0], x.shape[1], num_caps, len(neighbors[0])
-
-    delta_d = int(d // k)
-    _cache_zero_d = torch.zeros(1, d).to(dev)
-    _cache_zero_k = torch.zeros(1, k).to(dev)
-    final_chunks = []
-
-    # Convert to smaller data type
-    x = x.to(torch.float16)
-    _cache_zero_d = _cache_zero_d.to(torch.float16)
-    _cache_zero_k = _cache_zero_k.to(torch.float16)
-
-    for nl in range(nlayer):
-        if nl > 0:
-            x = final_chunks[-1]  # Reuse the last final_chunks as input
-        x = F.normalize(x.view(n, k, delta_d), dim=2).view(n, d).to(torch.float16)  # Normalize and convert to smaller data type
-        temp_z = torch.cat([x, _cache_zero_d], dim=0)
-        final_chunks_batch = []
-
-        for idx in range(0, neighbors.shape[0], batch_size):
-            torch.cuda.empty_cache()  # Clear intermediate tensors
-
-            batch_end = min(idx + batch_size, neighbors.shape[0])
-            neigh = neighbors[idx:batch_end, :]
-            chunk_size = neigh.shape[0]
-            z = temp_z[neigh].view(chunk_size, m, k, delta_d)
-
-            u = None
-            for clus_iter in range(max_iter):
-                if clus_iter == 0:
-                    p = _cache_zero_k.expand(chunk_size * m, k).view(chunk_size, m, k)
-                else:
-                    p = torch.sum(z * u.view(chunk_size, 1, k, delta_d), dim=3)
-
-                p = F.softmax(p, dim=2)
-                u = torch.sum(z * p.view(chunk_size, m, k, 1), dim=1)
-
-                u += x[idx:batch_end, :].view(chunk_size, k, delta_d)
-                if clus_iter < max_iter - 1:
-                    u = F.normalize(u, dim=2).to(torch.float16)  # Normalize and convert to smaller data type
-
-            final_chunks_batch.append(u.view(chunk_size, d))
-
-        final_chunks_batch = torch.cat(final_chunks_batch, dim=0).to(torch.float32)  # Convert to original data type
-        final_chunks.append(final_chunks_batch)
-
-    return final_chunks[-1]  # Return the last final_chunks
+    return final_chunks[-1] 
 
 class ClusterAssignment(nn.Module):
     def __init__(self, cluster_number, embedding_dimension, alpha, cluster_centers=None):
@@ -340,8 +250,7 @@ class MaskGAE(nn.Module):
             ch_decoder,
             mask,
             torch_generator,
-            num_labels
-    ):
+            num_labels):
         super().__init__()
         self.encoder = encoder
         self.edge_decoder = edge_decoder
@@ -450,17 +359,15 @@ class MaskGAE(nn.Module):
             torch.zeros(node_num, node_num).to(trace_mat.device),
             1,
             torch.arange(node_num).view(-1, 1).to(trace_mat.device),
-            1
-        ) # check need
+            1) 
         trace_mat = trace_mat * scatter_mat
         trace_mat = torch.sum(trace_mat)
         trace_mat = trace_mat / (2 * edge_num)
         loss_trace = trace_mat * trace_reg # lambda 2 value -> change it to args
         return loss_trace, torch.matmul(z, z.T) * (torch.ones(node_num, node_num).to(trace_mat.device) - scatter_mat)
 
-    
     def train_epoch(
-            self, args, train_data, optimizer, scheduler, batch_size, grad_norm, train_B, epoch):
+            self, args, train_data, optimizer, scheduler, batch_size, grad_norm, epoch):
         optimizer.zero_grad()
 
         x, edge_index, y = train_data.x, train_data.edge_index, train_data.y
@@ -471,7 +378,7 @@ class MaskGAE(nn.Module):
                                           num_neg_samples=masked_edges.view(2, -1).size(1), ).view_as(masked_edges)
         self.nhidden = args.encoder_out // args.ncaps
         self.disen_y = torch.arange(args.ncaps).long().unsqueeze(dim=0).repeat(train_data.num_nodes, 1).flatten().to(
-            x.device)  # tensor([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3,
+            x.device) 
         # remaining loss
         for perm in DataLoader(
                 range(masked_edges.size(1)), batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker,
@@ -479,12 +386,12 @@ class MaskGAE(nn.Module):
             train_neighbors = self.neigh_sampler_torch(args, train_data.num_nodes, remaining_edges, epoch)
 
             try:
-                z, score_list = self.encoder(args, epoch, x, remaining_edges, train_neighbors, self.cluster_pred, self.previous_unconflicted_new, train_B)
+                z, score_list = self.encoder(args, epoch, x, remaining_edges, train_neighbors, self.cluster_pred, self.previous_unconflicted_new)
             
             except:
-                z, score_list = self.encoder(args, epoch, x, remaining_edges, train_neighbors, self.cluster_pred, self.previous_unconflicted, train_B)
+                z, score_list = self.encoder(args, epoch, x, remaining_edges, train_neighbors, self.cluster_pred, self.previous_unconflicted)
             #### clustering loss
-            cluster_loss, cluster_emb = self.clustering_loss(z, remaining_edges, args.trace)
+            cluster_loss, cluster_emb = self.clustering_loss(z, remaining_edges, args.trace_reg)
 
             new_cluster = torch.where(cluster_emb>=args.cluster_emb) # threshold -> change it to args
             previous_unconflicted_set = set(self.previous_unconflicted.tolist())
@@ -502,7 +409,7 @@ class MaskGAE(nn.Module):
             batch_neg_edges = neg_edges[:, perm]
             # ******************* loss for edge prediction *********************
             pos_out = self.edge_decoder(z, batch_masked_edges)
-            neg_out = self.edge_decoder(z, batch_neg_edges)  # 계속 낮아짐
+            neg_out = self.edge_decoder(z, batch_neg_edges) 
             edge_loss = self.edge_loss_fn(pos_out, neg_out)
             # *****************************************************************
             print('calculating ch loss')
@@ -518,14 +425,10 @@ class MaskGAE(nn.Module):
             mask_init = torch.cat([ch_masking_temp[:, i, :] if i in zero_indices else torch.zeros_like(ch_masking_temp[:, i, :]) for i in range(args.ncaps)],
                                dim=-1)
             mask_recon = self.ch_decoder(mask_init)
-
             ch_init = ch_masking_temp[:, non_zero_indices, :]
             ch_rec = mask_recon[:, non_zero_indices, :]
-
             ch_loss = args.recon_alpha*self.ch_loss_fn(ch_rec, ch_init)
-
             loss = edge_loss +  ch_loss + cluster_loss 
-
             print('\nedge_loss', edge_loss, 'ch_loss', ch_loss, 'cluster_loss',cluster_loss)
             # ******************************************************************
             loss.backward()
@@ -549,80 +452,12 @@ class MaskGAE(nn.Module):
 
     @torch.no_grad()
     def test(self, z, pos_edge_index, neg_edge_index):
-
         pos_pred = self.batch_predict(z, pos_edge_index)
-        neg_pred = self.batch_predict(z, neg_edge_index)  # 계속 낮아짐
-
-        pred = torch.cat([pos_pred, neg_pred], dim=0)  # pred torch.Size([526])
+        neg_pred = self.batch_predict(z, neg_edge_index) 
+        pred = torch.cat([pos_pred, neg_pred], dim=0)  
         pos_y = pos_pred.new_ones(pos_pred.size(0))
         neg_y = neg_pred.new_zeros(neg_pred.size(0))
         y = torch.cat([pos_y, neg_y], dim=0)
         y, pred = y.cpu().numpy(), pred.cpu().numpy()
         return roc_auc_score(y, pred), average_precision_score(y, pred)
 
-
-
-# class clustering_metrics():
-
-#     def __init__(self, true_label, predict_label):
-#         self.true_label = true_label
-#         self.pred_label = predict_label
-
-#     def clusteringAcc(self):
-#         # best mapping between true_label and predict label
-#         l1 = list(set(self.true_label))
-#         numclass1 = len(l1)
-
-#         l2 = list(set(self.pred_label))
-#         numclass2 = len(l2)
-#         print('numclass1',numclass1,numclass2)
-#         if numclass1 != numclass2:
-#             print('Class Not equal, Error!!!!')
-#             return 0,0,0,0,0,0,0
-
-#         cost = np.zeros((numclass1, numclass2), dtype=int)
-#         for i, c1 in enumerate(l1):
-#             mps = [i1 for i1, e1 in enumerate(self.true_label) if e1 == c1]
-#             for j, c2 in enumerate(l2):
-#                 mps_d = [i1 for i1 in mps if self.pred_label[i1] == c2]
-
-#                 cost[i][j] = len(mps_d)
-
-#         # match two clustering results by Munkres algorithm
-#         m = Munkres()
-#         cost = cost.__neg__().tolist()
-
-#         indexes = m.compute(cost)
-
-#         # get the match results
-#         new_predict = np.zeros(len(self.pred_label))
-#         for i, c in enumerate(l1):
-#             c2 = l2[indexes[i][1]]
-#             ai = [ind for ind, elm in enumerate(self.pred_label) if elm == c2]
-#             new_predict[ai] = c
-
-#         acc = metrics.accuracy_score(self.true_label, new_predict)
-
-#         f1_macro = metrics.f1_score(self.true_label, new_predict, average='macro')
-#         precision_macro = metrics.precision_score(self.true_label, new_predict, average='macro')
-#         recall_macro = metrics.recall_score(self.true_label, new_predict, average='macro')
-#         f1_micro = metrics.f1_score(self.true_label, new_predict, average='micro')
-#         precision_micro = metrics.precision_score(self.true_label, new_predict, average='micro')
-#         recall_micro = metrics.recall_score(self.true_label, new_predict, average='micro')
-#         return acc, f1_macro, precision_macro, recall_macro, f1_micro, precision_micro, recall_micro
-
-    # def evaluationClusterModelFromLabel(self):
-    #     nmi = metrics.normalized_mutual_info_score(self.true_label, self.pred_label)
-    #     adjscore = metrics.adjusted_rand_score(self.true_label, self.pred_label)
-    #     acc, f1_macro, precision_macro, recall_macro, f1_micro, precision_micro, recall_micro = self.clusteringAcc()
-
-    #     print('ACC=%f, f1_macro=%f, precision_macro=%f, recall_macro=%f, f1_micro=%f, precision_micro=%f, recall_micro=%f, NMI=%f, ADJ_RAND_SCORE=%f' % (acc, f1_macro, precision_macro, recall_macro, f1_micro, precision_micro, recall_micro, nmi, adjscore))
-
-    #     fh = open('recoder.txt', 'a')
-
-    #     fh.write('ACC=%f, f1_macro=%f, precision_macro=%f, recall_macro=%f, f1_micro=%f, precision_micro=%f, recall_micro=%f, NMI=%f, ADJ_RAND_SCORE=%f' % (acc, f1_macro, precision_macro, recall_macro, f1_micro, precision_micro, recall_micro, nmi, adjscore) )
-    #     fh.write('\r\n')
-    #     fh.flush()
-    #     fh.close()
-
-    #     return acc, nmi, adjscore, f1_macro, precision_macro, f1_micro, precision_micro
